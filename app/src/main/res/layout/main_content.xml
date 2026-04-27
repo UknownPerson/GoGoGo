@@ -4,6 +4,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@drawable/bg_surface"
     tools:context=".MainActivity">
 
     <FrameLayout
@@ -20,6 +21,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="?attr/actionBarSize"
                 android:background="@color/colorPrimary"
+                app:titleTextColor="@android:color/white"
                 app:popupTheme="@style/AppTheme.PopupOverlay" />
 
         </com.google.android.material.appbar.AppBarLayout>
@@ -37,10 +39,10 @@
             android:layout_gravity="top|start"
             android:layout_marginStart="12dp"
             android:layout_marginTop="72dp"
-            android:background="#AA000000"
-            android:padding="8dp"
+            android:background="@drawable/bg_status_card"
             android:textColor="#FFFFFF"
-            android:textSize="12sp"
+            android:lineSpacingExtra="2dp"
+            android:textSize="13sp"
             android:visibility="gone" />
 
         <com.google.android.material.floatingactionbutton.FloatingActionButton
@@ -51,8 +53,10 @@
             android:layout_marginStart="30dp"
             android:layout_marginBottom="80dp"
             android:contentDescription="@null"
+            app:backgroundTint="@color/colorAccent"
             app:elevation="6dp"
             app:pressedTranslationZ="12dp"
+            app:tint="@android:color/white"
             app:srcCompat="@drawable/ic_position" />
 
         <com.google.android.material.floatingactionbutton.FloatingActionButton
@@ -63,22 +67,25 @@
             android:layout_marginStart="30dp"
             android:layout_marginBottom="150dp"
             android:contentDescription="@string/campus_run_title"
+            app:backgroundTint="@color/colorPrimary"
             app:elevation="6dp"
             app:pressedTranslationZ="12dp"
+            app:tint="@android:color/white"
             app:srcCompat="@drawable/ic_run_w" />
 
         <LinearLayout
             android:id="@+id/search_linear"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="#ddffffff"
-            android:visibility="gone"
-            android:layout_marginTop="?attr/actionBarSize">
+            android:layout_marginTop="?attr/actionBarSize"
+            android:background="@drawable/bg_search_panel"
+            android:elevation="4dp"
+            android:visibility="gone">
             <ListView
                 android:id="@+id/search_list_view"
                 android:layout_width="match_parent"
-                android:layout_margin="10dp"
-                android:layout_height="wrap_content">
+                android:layout_height="wrap_content"
+                android:layout_margin="8dp">
             </ListView>
         </LinearLayout>
 
@@ -86,14 +93,15 @@
             android:id="@+id/search_history_linear"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="#ddffffff"
-            android:visibility="gone"
-            android:layout_marginTop="?attr/actionBarSize">
+            android:layout_marginTop="?attr/actionBarSize"
+            android:background="@drawable/bg_search_panel"
+            android:elevation="4dp"
+            android:visibility="gone">
             <ListView
                 android:id="@+id/search_history_list_view"
                 android:layout_width="match_parent"
-                android:layout_margin="10dp"
-                android:layout_height="wrap_content">
+                android:layout_height="wrap_content"
+                android:layout_margin="8dp">
             </ListView>
         </LinearLayout>
 

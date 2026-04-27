@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="colorPrimary">#ff008577</color>
-    <color name="colorPrimaryDark">#ff008577</color>
-    <color name="colorAccent">#ff00897B</color>
+    <color name="colorPrimary">#1B4965</color>
+    <color name="colorPrimaryDark">#123449</color>
+    <color name="colorAccent">#2B7A9A</color>
+    <color name="colorSurface">#F4F7FB</color>
+    <color name="colorSurfaceCard">#FFFFFFFF</color>
+    <color name="colorTextPrimary">#1A2333</color>
+    <color name="colorTextSecondary">#5B6B80</color>
 
     <color name="white">#ffffff</color> <!-- 白色 -->
     <color name="ivory">#fffff0</color> <!-- 象牙色 -->
