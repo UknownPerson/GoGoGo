@@ -31,6 +31,9 @@ import com.elvishew.xlog.XLog;
 import com.zcshou.gogogo.MainActivity;
 import com.zcshou.gogogo.R;
 import com.zcshou.joystick.JoyStick;
+import com.zcshou.utils.CampusRunUtils;
+
+import java.util.Random;
 
 public class ServiceGo extends Service {
     // 定位相关变量
@@ -49,6 +52,7 @@ public class ServiceGo extends Service {
     private HandlerThread mLocHandlerThread;
     private Handler mLocHandler;
     private boolean isStop = false;
+    private long mLastTickElapsedMs = 0L;
     // 通知栏消息
     private static final int SERVICE_GO_NOTE_ID = 1;
     private static final String SERVICE_GO_NOTE_ACTION_JOYSTICK_SHOW = "ShowJoyStick";
@@ -58,6 +62,39 @@ public class ServiceGo extends Service {
     private NoteActionReceiver mActReceiver;
     // 摇杆相关
     private JoyStick mJoyStick;
+    // 校园跑（测试）相关
+    private boolean mCampusRunEnabled = false;
+    private double[] mCampusRunLngs = null;
+    private double[] mCampusRunLats = null;
+    private int mCampusRunLapTarget = 0;
+    private int mCampusRunLapDone = 0;
+    private int mCampusRunTargetIndex = 1;
+    private double mCampusRunPaceMin = 5.0;
+    private double mCampusRunPaceMax = 8.0;
+    private int mCampusRunPaceUpdateSec = 8;
+    private double mCampusRunCurrentSpeed = 3.0;
+    private boolean mCampusRunPaused = false;
+    private long mCampusRunNextPaceUpdateElapsedMs = 0L;
+    private double mCampusRunOffsetMeters = 0.0;
+    private double mCampusRunNavLat = DEFAULT_LAT;
+    private double mCampusRunNavLng = DEFAULT_LNG;
+    private int mCampusRunLaneIndex = 0;
+    private double mCampusRunLaneOffsetCurrentMeters = 0.0;
+    private double mCampusRunLaneOffsetTargetMeters = 0.0;
+    private long mCampusRunNextLaneSwitchElapsedMs = 0L;
+    private double mCampusRunLapDistanceMeters = 0.0;
+    private double mCampusRunMovedMeters = 0.0;
+    private double mCampusRunElapsedSec = 0.0;
+    private double mLastValidLat = DEFAULT_LAT;
+    private double mLastValidLng = DEFAULT_LNG;
+    private boolean mAllowLargeJumpOnce = false;
+    private boolean mHasAnchor = false;
+    private double mAnchorLat = DEFAULT_LAT;
+    private double mAnchorLng = DEFAULT_LNG;
+    private final Random mRandom = new Random();
+    private static final double CAMPUS_LANE_CHANGE_SPEED_MPS = 0.9;
+    private long mLastGpsRecoverElapsedMs = 0L;
+    private long mLastNetworkRecoverElapsedMs = 0L;
 
     private final ServiceGoBinder mBinder = new ServiceGoBinder();
 
@@ -87,9 +124,18 @@ public class ServiceGo extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        mCurLng = intent.getDoubleExtra(MainActivity.LNG_MSG_ID, DEFAULT_LNG);
-        mCurLat = intent.getDoubleExtra(MainActivity.LAT_MSG_ID, DEFAULT_LAT);
-        mCurAlt = intent.getDoubleExtra(MainActivity.ALT_MSG_ID, DEFAULT_ALT);
+        if (intent != null) {
+            mCurLng = intent.getDoubleExtra(MainActivity.LNG_MSG_ID, DEFAULT_LNG);
+            mCurLat = intent.getDoubleExtra(MainActivity.LAT_MSG_ID, DEFAULT_LAT);
+            mCurAlt = intent.getDoubleExtra(MainActivity.ALT_MSG_ID, DEFAULT_ALT);
+        }
+        mAllowLargeJumpOnce = true;
+        if (isValidCoordinate(mCurLat, mCurLng)) {
+            mHasAnchor = true;
+            mAnchorLat = mCurLat;
+            mAnchorLng = mCurLng;
+        }
+        sanitizeCurrentPosition();
 
         mJoyStick.setCurrentPosition(mCurLng, mCurLat, mCurAlt);
 
@@ -153,21 +199,36 @@ public class ServiceGo extends Service {
         mJoyStick.setListener(new JoyStick.JoyStickClickListener() {
             @Override
             public void onMoveInfo(double speed, double disLng, double disLat, double angle) {
+                if (mCampusRunEnabled) {
+                    return;
+                }
                 mSpeed = speed;
                 // 根据当前的经纬度和距离，计算下一个经纬度
                 // Latitude: 1 deg = 110.574 km // 纬度的每度的距离大约为 110.574km
                 // Longitude: 1 deg = 111.320*cos(latitude) km  // 经度的每度的距离从0km到111km不等
                 // 具体见：http://wp.mlab.tw/?p=2200
-                mCurLng += disLng / (111.320 * Math.cos(Math.abs(mCurLat) * Math.PI / 180));
+                double metersPerLngKm = 111.320 * Math.cos(Math.abs(mCurLat) * Math.PI / 180);
+                if (Double.isFinite(metersPerLngKm) && Math.abs(metersPerLngKm) > 1e-6) {
+                    mCurLng += disLng / metersPerLngKm;
+                }
                 mCurLat += disLat / 110.574;
                 mCurBea = (float) angle;
+                sanitizeCurrentPosition();
             }
 
             @Override
             public void onPositionInfo(double lng, double lat, double alt) {
+                if (mCampusRunEnabled) {
+                    return;
+                }
+                if (!isValidCoordinate(lat, lng) || isSuspiciousGuinea(lat, lng)) {
+                    XLog.e("SERVICEGO: ignore suspicious onPositionInfo lat=%s lng=%s", lat, lng);
+                    return;
+                }
                 mCurLng = lng;
                 mCurLat = lat;
                 mCurAlt = alt;
+                sanitizeCurrentPosition();
             }
         });
         mJoyStick.show();
@@ -187,6 +248,14 @@ public class ServiceGo extends Service {
                     Thread.sleep(100);
 
                     if (!isStop) {
+                        long now = SystemClock.elapsedRealtime();
+                        if (mLastTickElapsedMs == 0L) {
+                            mLastTickElapsedMs = now;
+                        }
+                        double deltaSec = (now - mLastTickElapsedMs) / 1000.0;
+                        mLastTickElapsedMs = now;
+                        updateCampusRunStep(deltaSec);
+
                         setLocationNetwork();
                         setLocationGPS();
 
@@ -199,7 +268,191 @@ public class ServiceGo extends Service {
             }
         };
 
+        mLastTickElapsedMs = SystemClock.elapsedRealtime();
         mLocHandler.sendEmptyMessage(HANDLER_MSG_ID);
+    }
+
+    private void updateCampusRunStep(double deltaSec) {
+        if (!mCampusRunEnabled || mCampusRunLngs == null || mCampusRunLats == null || mCampusRunLngs.length < 2) {
+            return;
+        }
+        if (mCampusRunPaused) {
+            return;
+        }
+        if (deltaSec <= 0.0) {
+            return;
+        }
+
+        updateCampusRunSpeedIfNeeded(SystemClock.elapsedRealtime());
+        updateCampusRunLaneIfNeeded(SystemClock.elapsedRealtime());
+        updateCampusRunLaneTransition(deltaSec);
+        double plannedMeters = mCampusRunCurrentSpeed * deltaSec;
+        double remainMeters = plannedMeters;
+        mSpeed = mCampusRunCurrentSpeed;
+
+        while (remainMeters > 0.0 && mCampusRunEnabled) {
+            int targetIdx = mCampusRunTargetIndex;
+            double targetLng = mCampusRunLngs[targetIdx];
+            double targetLat = mCampusRunLats[targetIdx];
+            double distanceToTarget = distanceMeters(mCampusRunNavLat, mCampusRunNavLng, targetLat, targetLng);
+
+            if (distanceToTarget < 0.01) {
+                moveToNextCampusPoint();
+                continue;
+            }
+
+            if (remainMeters < distanceToTarget) {
+                double ratio = remainMeters / distanceToTarget;
+                double nextLat = mCampusRunNavLat + (targetLat - mCampusRunNavLat) * ratio;
+                double nextLng = mCampusRunNavLng + (targetLng - mCampusRunNavLng) * ratio;
+                mCurBea = bearingDegrees(mCampusRunNavLat, mCampusRunNavLng, nextLat, nextLng);
+                mCampusRunNavLat = nextLat;
+                mCampusRunNavLng = nextLng;
+                remainMeters = 0.0;
+            } else {
+                mCurBea = bearingDegrees(mCampusRunNavLat, mCampusRunNavLng, targetLat, targetLng);
+                mCampusRunNavLat = targetLat;
+                mCampusRunNavLng = targetLng;
+                remainMeters -= distanceToTarget;
+                moveToNextCampusPoint();
+            }
+        }
+
+        double movedMeters = Math.max(0.0, plannedMeters - remainMeters);
+        mCampusRunMovedMeters += movedMeters;
+        mCampusRunElapsedSec += deltaSec;
+        applyCampusRunOffsetToCurrent();
+    }
+
+    private void updateCampusRunSpeedIfNeeded(long nowElapsedMs) {
+        if (!mCampusRunEnabled) {
+            return;
+        }
+        if (nowElapsedMs < mCampusRunNextPaceUpdateElapsedMs) {
+            return;
+        }
+
+        double minPace = Math.min(mCampusRunPaceMin, mCampusRunPaceMax);
+        double maxPace = Math.max(mCampusRunPaceMin, mCampusRunPaceMax);
+        double pace = minPace + mRandom.nextDouble() * (maxPace - minPace);
+        mCampusRunCurrentSpeed = paceMinPerKmToSpeed(pace);
+        mCampusRunNextPaceUpdateElapsedMs = nowElapsedMs + mCampusRunPaceUpdateSec * 1000L;
+    }
+
+    private static double paceMinPerKmToSpeed(double paceMinPerKm) {
+        if (paceMinPerKm <= 0.0) {
+            return 0.8;
+        }
+        return 1000.0 / (paceMinPerKm * 60.0);
+    }
+
+    private void updateCampusRunLaneIfNeeded(long nowElapsedMs) {
+        if (!mCampusRunEnabled) {
+            return;
+        }
+        if (nowElapsedMs < mCampusRunNextLaneSwitchElapsedMs) {
+            return;
+        }
+
+        int nextLane;
+        if (mCampusRunLaneIndex <= 0) {
+            nextLane = 1;
+        } else if (mCampusRunLaneIndex >= CampusRunUtils.TRACK_LANE_COUNT - 1) {
+            nextLane = CampusRunUtils.TRACK_LANE_COUNT - 2;
+        } else {
+            nextLane = mCampusRunLaneIndex + (mRandom.nextBoolean() ? 1 : -1);
+        }
+        mCampusRunLaneIndex = nextLane;
+        mCampusRunLaneOffsetTargetMeters = mCampusRunLaneIndex * CampusRunUtils.TRACK_LANE_WIDTH_M;
+        mCampusRunNextLaneSwitchElapsedMs = nowElapsedMs + mCampusRunPaceUpdateSec * 1000L;
+    }
+
+    private void updateCampusRunLaneTransition(double deltaSec) {
+        double diff = mCampusRunLaneOffsetTargetMeters - mCampusRunLaneOffsetCurrentMeters;
+        if (Math.abs(diff) < 1e-4) {
+            mCampusRunLaneOffsetCurrentMeters = mCampusRunLaneOffsetTargetMeters;
+            return;
+        }
+        double maxStep = CAMPUS_LANE_CHANGE_SPEED_MPS * deltaSec;
+        if (Math.abs(diff) <= maxStep) {
+            mCampusRunLaneOffsetCurrentMeters = mCampusRunLaneOffsetTargetMeters;
+        } else {
+            mCampusRunLaneOffsetCurrentMeters += Math.signum(diff) * maxStep;
+        }
+    }
+
+    private void moveToNextCampusPoint() {
+        if (mCampusRunLngs == null || mCampusRunLats == null || mCampusRunLngs.length < 2) {
+            mCampusRunEnabled = false;
+            return;
+        }
+
+        mCampusRunTargetIndex++;
+        if (mCampusRunTargetIndex >= mCampusRunLngs.length) {
+            mCampusRunTargetIndex = 1;
+            mCampusRunLapDone++;
+            if (mCampusRunLapTarget > 0 && mCampusRunLapDone >= mCampusRunLapTarget) {
+                mCampusRunEnabled = false;
+            }
+        }
+    }
+
+    private static float bearingDegrees(double fromLat, double fromLng, double toLat, double toLng) {
+        double fromLatRad = Math.toRadians(fromLat);
+        double toLatRad = Math.toRadians(toLat);
+        double deltaLngRad = Math.toRadians(toLng - fromLng);
+        double y = Math.sin(deltaLngRad) * Math.cos(toLatRad);
+        double x = Math.cos(fromLatRad) * Math.sin(toLatRad)
+                - Math.sin(fromLatRad) * Math.cos(toLatRad) * Math.cos(deltaLngRad);
+        double brng = Math.toDegrees(Math.atan2(y, x));
+        brng = (brng + 360.0) % 360.0;
+        return (float) brng;
+    }
+
+    private static double distanceMeters(double lat1, double lng1, double lat2, double lng2) {
+        double r = 6378137.0;
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLng = Math.toRadians(lng2 - lng1);
+        double a = Math.sin(dLat / 2.0) * Math.sin(dLat / 2.0)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLng / 2.0) * Math.sin(dLng / 2.0);
+        double c = 2.0 * Math.atan2(Math.sqrt(a), Math.sqrt(1.0 - a));
+        return r * c;
+    }
+
+    private static double polylineDistanceMeters(double[] lats, double[] lngs) {
+        if (lats == null || lngs == null || lats.length != lngs.length || lats.length < 2) {
+            return 0.0;
+        }
+        double total = 0.0;
+        for (int i = 1; i < lats.length; i++) {
+            total += distanceMeters(lats[i - 1], lngs[i - 1], lats[i], lngs[i]);
+        }
+        return total;
+    }
+
+    private void applyCampusRunOffsetToCurrent() {
+        double laneOffsetMeters = mCampusRunLaneOffsetCurrentMeters;
+        double bearingRad = Math.toRadians(mCurBea);
+        double headingEast = Math.sin(bearingRad);
+        double headingNorth = Math.cos(bearingRad);
+        double rightEast = headingNorth;
+        double rightNorth = -headingEast;
+
+        double eastOffset = rightEast * laneOffsetMeters;
+        double northOffset = rightNorth * laneOffsetMeters;
+        if (mCampusRunOffsetMeters > 0.0) {
+            northOffset += (mRandom.nextDouble() * 2.0 - 1.0) * mCampusRunOffsetMeters;
+            eastOffset += (mRandom.nextDouble() * 2.0 - 1.0) * mCampusRunOffsetMeters;
+        }
+
+        mCurLat = mCampusRunNavLat + northOffset / 110574.0;
+        double metersPerLngDeg = 111320.0 * Math.cos(Math.toRadians(mCampusRunNavLat));
+        if (Math.abs(metersPerLngDeg) < 1e-6) {
+            mCurLng = mCampusRunNavLng;
+        } else {
+            mCurLng = mCampusRunNavLng + eastOffset / metersPerLngDeg;
+        }
     }
 
     private void removeTestProviderGPS() {
@@ -235,6 +488,8 @@ public class ServiceGo extends Service {
 
     private void setLocationGPS() {
         try {
+            sanitizeCurrentPosition();
+            XLog.e("SERVICEGO: before GPS inject lat=%s lng=%s alt=%s", mCurLat, mCurLng, mCurAlt);
             // 尽可能模拟真实的 GPS 数据
             Location loc = new Location(LocationManager.GPS_PROVIDER);
             loc.setAccuracy(Criteria.ACCURACY_FINE);    // 设定此位置的估计水平精度，以米为单位。
@@ -250,8 +505,10 @@ public class ServiceGo extends Service {
             loc.setExtras(bundle);
 
             mLocManager.setTestProviderLocation(LocationManager.GPS_PROVIDER, loc);
+            XLog.e("SERVICEGO: after GPS inject lat=%s lng=%s", mCurLat, mCurLng);
         } catch (Exception e) {
-            XLog.e("SERVICEGO: ERROR - setLocationGPS");
+            XLog.e("SERVICEGO: ERROR - setLocationGPS", e);
+            recoverGpsProviderIfNeeded();
         }
     }
 
@@ -290,6 +547,8 @@ public class ServiceGo extends Service {
 
     private void setLocationNetwork() {
         try {
+            sanitizeCurrentPosition();
+            XLog.e("SERVICEGO: before NETWORK inject lat=%s lng=%s alt=%s", mCurLat, mCurLng, mCurAlt);
             // 尽可能模拟真实的 NETWORK 数据
             Location loc = new Location(LocationManager.NETWORK_PROVIDER);
             loc.setAccuracy(Criteria.ACCURACY_COARSE);  // 设定此位置的估计水平精度，以米为单位。
@@ -302,8 +561,40 @@ public class ServiceGo extends Service {
             loc.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
 
             mLocManager.setTestProviderLocation(LocationManager.NETWORK_PROVIDER, loc);
+            XLog.e("SERVICEGO: after NETWORK inject lat=%s lng=%s", mCurLat, mCurLng);
         } catch (Exception e) {
-            XLog.e("SERVICEGO: ERROR - setLocationNetwork");
+            XLog.e("SERVICEGO: ERROR - setLocationNetwork", e);
+            recoverNetworkProviderIfNeeded();
+        }
+    }
+
+    private void recoverGpsProviderIfNeeded() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - mLastGpsRecoverElapsedMs < 2000L) {
+            return;
+        }
+        mLastGpsRecoverElapsedMs = now;
+        try {
+            removeTestProviderGPS();
+            addTestProviderGPS();
+            XLog.w("SERVICEGO: recovered GPS provider");
+        } catch (Exception e) {
+            XLog.e("SERVICEGO: recover GPS provider failed", e);
+        }
+    }
+
+    private void recoverNetworkProviderIfNeeded() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - mLastNetworkRecoverElapsedMs < 2000L) {
+            return;
+        }
+        mLastNetworkRecoverElapsedMs = now;
+        try {
+            removeTestProviderNetwork();
+            addTestProviderNetwork();
+            XLog.w("SERVICEGO: recovered NETWORK provider");
+        } catch (Exception e) {
+            XLog.e("SERVICEGO: recover NETWORK provider failed", e);
         }
     }
 
@@ -324,15 +615,196 @@ public class ServiceGo extends Service {
     }
 
     public class ServiceGoBinder extends Binder {
+        public class CampusRunStatus {
+            public final int laneNumber;
+            public final double currentPaceMinPerKm;
+            public final double averagePaceMinPerKm;
+            public final int lapDone;
+            public final int lapTarget;
+            public final double totalDistanceMeters;
+            public final double completionPercent;
+            public final double elapsedSeconds;
+            public final boolean running;
+            public final boolean paused;
+
+            public CampusRunStatus(int laneNumber, double currentPaceMinPerKm, double averagePaceMinPerKm,
+                                   int lapDone, int lapTarget, double totalDistanceMeters, double completionPercent,
+                                   double elapsedSeconds, boolean running, boolean paused) {
+                this.laneNumber = laneNumber;
+                this.currentPaceMinPerKm = currentPaceMinPerKm;
+                this.averagePaceMinPerKm = averagePaceMinPerKm;
+                this.lapDone = lapDone;
+                this.lapTarget = lapTarget;
+                this.totalDistanceMeters = totalDistanceMeters;
+                this.completionPercent = completionPercent;
+                this.elapsedSeconds = elapsedSeconds;
+                this.running = running;
+                this.paused = paused;
+            }
+        }
+
         public void setPosition(double lng, double lat, double alt) {
             mLocHandler.removeMessages(HANDLER_MSG_ID);
-            mCurLng = lng;
-            mCurLat = lat;
+            mCampusRunEnabled = false;
+            mCampusRunPaused = false;
+            if (isValidCoordinate(lat, lng) && !isSuspiciousGuinea(lat, lng)) {
+                mCurLng = lng;
+                mCurLat = lat;
+                mHasAnchor = true;
+                mAnchorLat = lat;
+                mAnchorLng = lng;
+            }
             mCurAlt = alt;
+            mAllowLargeJumpOnce = true;
+            sanitizeCurrentPosition();
+            mLastTickElapsedMs = SystemClock.elapsedRealtime();
             mLocHandler.sendEmptyMessage(HANDLER_MSG_ID);
             mJoyStick.setCurrentPosition(mCurLng, mCurLat, mCurAlt);
         }
+
+        public boolean startCampusRun(double[] wgsLngs, double[] wgsLats, int laps, double paceMin, double paceMax, int paceUpdateSec, double offsetMeters) {
+            if (wgsLngs == null || wgsLats == null || wgsLngs.length != wgsLats.length || wgsLngs.length < 2) {
+                return false;
+            }
+            if (paceMin <= 0.0 || paceMax <= 0.0 || paceUpdateSec < 1) {
+                return false;
+            }
+
+            mCampusRunLngs = wgsLngs;
+            mCampusRunLats = wgsLats;
+            mCampusRunLapTarget = Math.max(1, laps);
+            mCampusRunLapDone = 0;
+            mCampusRunTargetIndex = 1;
+            mCampusRunPaceMin = Math.min(paceMin, paceMax);
+            mCampusRunPaceMax = Math.max(paceMin, paceMax);
+            mCampusRunPaceUpdateSec = paceUpdateSec;
+            mCampusRunOffsetMeters = Math.max(0.0, offsetMeters);
+            mCampusRunEnabled = true;
+            mCampusRunPaused = false;
+            mCampusRunNavLng = mCampusRunLngs[0];
+            mCampusRunNavLat = mCampusRunLats[0];
+            mHasAnchor = true;
+            mAnchorLat = mCampusRunNavLat;
+            mAnchorLng = mCampusRunNavLng;
+            mCampusRunLaneIndex = 0;
+            mCampusRunLaneOffsetCurrentMeters = 0.0;
+            mCampusRunLaneOffsetTargetMeters = 0.0;
+            mCampusRunLapDistanceMeters = polylineDistanceMeters(mCampusRunLats, mCampusRunLngs);
+            mCampusRunMovedMeters = 0.0;
+            mCampusRunElapsedSec = 0.0;
+            mLastTickElapsedMs = SystemClock.elapsedRealtime();
+            mCampusRunNextPaceUpdateElapsedMs = 0L;
+            mCampusRunNextLaneSwitchElapsedMs = mLastTickElapsedMs + mCampusRunPaceUpdateSec * 1000L;
+            updateCampusRunSpeedIfNeeded(mLastTickElapsedMs);
+            mSpeed = mCampusRunCurrentSpeed;
+            applyCampusRunOffsetToCurrent();
+            mAllowLargeJumpOnce = true;
+            sanitizeCurrentPosition();
+            mLocHandler.removeMessages(HANDLER_MSG_ID);
+            mLocHandler.sendEmptyMessage(HANDLER_MSG_ID);
+            mJoyStick.setCurrentPosition(mCurLng, mCurLat, mCurAlt);
+            return true;
+        }
+
+        public void stopCampusRun() {
+            mCampusRunEnabled = false;
+            mCampusRunPaused = false;
+        }
+
+        public void pauseCampusRun() {
+            if (!mCampusRunEnabled) {
+                return;
+            }
+            mCampusRunPaused = true;
+        }
+
+        public void resumeCampusRun() {
+            if (!mCampusRunEnabled) {
+                return;
+            }
+            mCampusRunPaused = false;
+            mLastTickElapsedMs = SystemClock.elapsedRealtime();
+        }
+
+        public boolean isCampusRunRunning() {
+            return mCampusRunEnabled;
+        }
+
+        public boolean isCampusRunPaused() {
+            return mCampusRunEnabled && mCampusRunPaused;
+        }
+
+        public CampusRunStatus getCampusRunStatus() {
+            double currentPace = mCampusRunCurrentSpeed > 1e-6 ? 1000.0 / (mCampusRunCurrentSpeed * 60.0) : 0.0;
+            double avgPace = mCampusRunMovedMeters > 1e-3 ? (mCampusRunElapsedSec / 60.0) / (mCampusRunMovedMeters / 1000.0) : 0.0;
+            double totalMeters = mCampusRunLapDistanceMeters * Math.max(1, mCampusRunLapTarget);
+            double completion = totalMeters > 1e-3 ? Math.min(100.0, (mCampusRunMovedMeters / totalMeters) * 100.0) : 0.0;
+            return new CampusRunStatus(
+                    Math.max(1, Math.min(CampusRunUtils.TRACK_LANE_COUNT,
+                            (int) Math.round(mCampusRunLaneOffsetCurrentMeters / CampusRunUtils.TRACK_LANE_WIDTH_M) + 1)),
+                    currentPace,
+                    avgPace,
+                    mCampusRunLapDone,
+                    Math.max(1, mCampusRunLapTarget),
+                    mCampusRunMovedMeters,
+                    completion,
+                    mCampusRunElapsedSec,
+                    mCampusRunEnabled,
+                    mCampusRunEnabled && mCampusRunPaused
+            );
+        }
+    }
+
+    private static boolean isValidCoordinate(double lat, double lng) {
+        if (Double.isNaN(lat) || Double.isNaN(lng) || Double.isInfinite(lat) || Double.isInfinite(lng)) {
+            return false;
+        }
+        return lat >= -90.0 && lat <= 90.0 && lng >= -180.0 && lng <= 180.0;
+    }
+
+    private static boolean isSuspiciousGuinea(double lat, double lng) {
+        return Math.abs(lat) < 1.0 && Math.abs(lng) < 1.0;
+    }
+
+    private void sanitizeCurrentPosition() {
+        if (!isValidCoordinate(mCurLat, mCurLng)) {
+            XLog.e("SERVICEGO: rollback invalid coord lat=%s lng=%s -> lat=%s lng=%s",
+                    mCurLat, mCurLng, mLastValidLat, mLastValidLng);
+            mCurLat = mLastValidLat;
+            mCurLng = mLastValidLng;
+            mAllowLargeJumpOnce = false;
+            return;
+        }
+        if (isSuspiciousGuinea(mCurLat, mCurLng) && !isSuspiciousGuinea(mLastValidLat, mLastValidLng)) {
+            XLog.e("SERVICEGO: rollback suspicious gulf coord lat=%s lng=%s -> lat=%s lng=%s",
+                    mCurLat, mCurLng, mLastValidLat, mLastValidLng);
+            mCurLat = mLastValidLat;
+            mCurLng = mLastValidLng;
+            mAllowLargeJumpOnce = false;
+            return;
+        }
+        if (!mAllowLargeJumpOnce) {
+            double jumpMeters = distanceMeters(mLastValidLat, mLastValidLng, mCurLat, mCurLng);
+            if (jumpMeters > 5000.0) {
+                XLog.e("SERVICEGO: rollback large jump %.1fm lat=%s lng=%s -> lat=%s lng=%s",
+                        jumpMeters, mCurLat, mCurLng, mLastValidLat, mLastValidLng);
+                mCurLat = mLastValidLat;
+                mCurLng = mLastValidLng;
+                return;
+            }
+            if (mHasAnchor) {
+                double anchorMeters = distanceMeters(mAnchorLat, mAnchorLng, mCurLat, mCurLng);
+                if (anchorMeters > 200000.0) {
+                    XLog.e("SERVICEGO: rollback out-of-anchor %.1fm lat=%s lng=%s anchorLat=%s anchorLng=%s",
+                            anchorMeters, mCurLat, mCurLng, mAnchorLat, mAnchorLng);
+                    mCurLat = mLastValidLat;
+                    mCurLng = mLastValidLng;
+                    return;
+                }
+            }
+        }
+        mLastValidLat = mCurLat;
+        mLastValidLng = mCurLng;
+        mAllowLargeJumpOnce = false;
     }
 }
-
-

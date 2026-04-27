@@ -57,6 +57,10 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
+        <meta-data
+            android:name="com.baidu.lbsapi.API_KEY"
+            android:value="${MAPS_API_KEY}" />
+
         <uses-library
             android:name="org.apache.http.legacy"
             android:required="false" />

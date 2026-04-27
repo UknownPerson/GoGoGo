@@ -137,4 +137,30 @@
     <string name="update_ignore">忽略一次</string>
     <string name="update_time">更新时间：</string>
     <string name="update_commit">提交信息：</string>
+    <!-- 校园跑（测试） -->
+    <string name="campus_run_title">校园跑</string>
+    <string name="campus_run_angle_label">操场长边朝向（相对正北顺时针，度）</string>
+    <string name="campus_run_laps_label">圈数</string>
+    <string name="campus_run_pace_min_label">最小配速（分/公里，数值越小越快）</string>
+    <string name="campus_run_pace_max_label">最大配速（分/公里）</string>
+    <string name="campus_run_pace_update_label">更新间隔（秒，跑道、配速）</string>
+    <string name="campus_run_offset_label">随机偏移（米）</string>
+    <string name="campus_run_preview">预览</string>
+    <string name="campus_run_start">开始</string>
+    <string name="campus_run_cancel">取消</string>
+    <string name="campus_run_need_center">请先在地图上点击操场上方圆弧最高点</string>
+    <string name="campus_run_preview_ok">已更新操场跑道预览</string>
+    <string name="campus_run_start_ok">校园跑已启动</string>
+    <string name="campus_run_stop_ok">校园跑已停止</string>
+    <string name="campus_run_invalid_input">校园跑参数不合法</string>
+    <string name="campus_run_control_title">校园跑控制</string>
+    <string name="campus_run_pause">暂停</string>
+    <string name="campus_run_resume">继续</string>
+    <string name="campus_run_finish">结束</string>
+    <string name="campus_run_pause_ok">校园跑已暂停</string>
+    <string name="campus_run_resume_ok">校园跑已继续</string>
+    <string name="campus_run_not_running">当前没有进行中的校园跑</string>
+    <string name="campus_run_running">进行中</string>
+    <string name="campus_run_paused">已暂停</string>
+    <string name="campus_run_finished">已结束</string>
 </resources>

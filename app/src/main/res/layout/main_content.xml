@@ -30,6 +30,19 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="?attr/actionBarSize" />
 
+        <TextView
+            android:id="@+id/campusRunStatusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_marginStart="12dp"
+            android:layout_marginTop="72dp"
+            android:background="#AA000000"
+            android:padding="8dp"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
         <com.google.android.material.floatingactionbutton.FloatingActionButton
             android:id="@+id/faBtnStart"
             android:layout_width="wrap_content"
@@ -41,6 +54,18 @@
             app:elevation="6dp"
             app:pressedTranslationZ="12dp"
             app:srcCompat="@drawable/ic_position" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/faBtnCampusRun"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|start"
+            android:layout_marginStart="30dp"
+            android:layout_marginBottom="150dp"
+            android:contentDescription="@string/campus_run_title"
+            app:elevation="6dp"
+            app:pressedTranslationZ="12dp"
+            app:srcCompat="@drawable/ic_run_w" />
 
         <LinearLayout
             android:id="@+id/search_linear"

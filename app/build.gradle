@@ -4,6 +4,20 @@ plugins {
     id "com.google.android.libraries.mapsplatform.secrets-gradle-plugin"
 }
 
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { stream ->
+        localProperties.load(stream)
+    }
+}
+def mapsApiKey = (localProperties.getProperty("MAPS_API_KEY") ?: "")
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+def mapsSafeCode = (localProperties.getProperty("MAPS_SAFE_CODE") ?: "")
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+
 android {
     ndkVersion = '26.2.11394342'
     compileSdk = 32
@@ -31,13 +45,17 @@ android {
         //noinspection ExpiredTargetSdkVersion
         targetSdkVersion 32
         versionCode 1123
-        versionName '1.12.3' // https://semver.org/lang/zh-CN/
+        versionName '1.12.3.1' // https://semver.org/lang/zh-CN/
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         resourceConfigurations += ['zh', 'zh-rCN', 'en', 'en-rUS']
         ndk {
             //noinspection ChromeOsAbiSupport
             abiFilters "arm64-v8a"
         }
+        manifestPlaceholders = [MAPS_API_KEY: mapsApiKey]
+        // Keep these fields available even when local secrets are missing.
+        buildConfigField "String", "MAPS_API_KEY", "\"${mapsApiKey}\""
+        buildConfigField "String", "MAPS_SAFE_CODE", "\"${mapsSafeCode}\""
         signingConfig = signingConfigs.release
     }
 
@@ -54,7 +72,7 @@ android {
             // Includes the default ProGuard rules files that are packaged with
             // the Android Gradle plugin. To learn more, go to the section about
             // R8 configuration files.
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
 
             signingConfig = signingConfigs.release
             multiDexEnabled = true

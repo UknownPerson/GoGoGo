@@ -76,7 +76,7 @@
         <SwitchPreferenceCompat
             app:key="setting_log_off"
             app:title="@string/setting_log_off"
-            app:defaultValue="false"
+            app:defaultValue="true"
             app:iconSpaceReserved="false"/>
         <EditTextPreference
             app:key="setting_history_expiration"

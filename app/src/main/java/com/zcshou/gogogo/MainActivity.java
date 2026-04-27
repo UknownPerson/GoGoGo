@@ -19,7 +19,9 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -66,6 +68,7 @@ import com.baidu.mapapi.map.MapView;
 import com.baidu.mapapi.map.MarkerOptions;
 import com.baidu.mapapi.map.MyLocationConfiguration;
 import com.baidu.mapapi.map.MyLocationData;
+import com.baidu.mapapi.map.PolylineOptions;
 import com.baidu.mapapi.model.LatLng;
 import com.baidu.mapapi.search.core.SearchResult;
 import com.baidu.mapapi.search.geocode.GeoCodeResult;
@@ -90,10 +93,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
 
 import com.zcshou.service.ServiceGo;
 import com.zcshou.database.DataBaseHistoryLocation;
 import com.zcshou.database.DataBaseHistorySearch;
+import com.zcshou.utils.CampusRunUtils;
 import com.zcshou.utils.ShareUtils;
 import com.zcshou.utils.GoUtils;
 import com.zcshou.utils.MapUtils;
@@ -147,6 +152,32 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
     private ServiceGo.ServiceGoBinder mServiceBinder;
     private ServiceConnection mConnection;
     private FloatingActionButton mButtonStart;
+    private FloatingActionButton mButtonCampusRun;
+    private TextView mCampusRunStatusText;
+    private final List<LatLng> mCampusTrackPreview = new ArrayList<>();
+    private final List<LatLng> mCampusTrackInnerPreview = new ArrayList<>();
+    private final List<LatLng> mCampusTrackOuterPreview = new ArrayList<>();
+    private double mCampusAngleDeg = -14.0;
+    private int mCampusLaps = 12;
+    private double mCampusPaceMin = 5.0;
+    private double mCampusPaceMax = 8.0;
+    private int mCampusPaceUpdateSec = 8;
+    private double mCampusOffsetMeters = 0.3;
+    private double[] mPendingCampusRunLngs;
+    private double[] mPendingCampusRunLats;
+    private int mPendingCampusRunLaps = 0;
+    private double mPendingCampusRunPaceMin = 0.0;
+    private double mPendingCampusRunPaceMax = 0.0;
+    private int mPendingCampusRunPaceUpdateSec = 0;
+    private double mPendingCampusRunOffsetMeters = 0.0;
+    private final Handler mUiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable mCampusStatusUpdater = new Runnable() {
+        @Override
+        public void run() {
+            updateCampusRunStatusText();
+            mUiHandler.postDelayed(this, 1000L);
+        }
+    };
     /*============================== 历史记录 相关 ==============================*/
     private SQLiteDatabase mLocationHistoryDB;
     private SQLiteDatabase mSearchHistoryDB;
@@ -197,11 +228,31 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
             @Override
             public void onServiceConnected(ComponentName name, IBinder service) {
                 mServiceBinder = (ServiceGo.ServiceGoBinder)service;
+                XLog.i("MainActivity: onServiceConnected, pendingCampusRun=%s", mPendingCampusRunLngs != null);
+                updateCampusRunStatusText();
+                if (mPendingCampusRunLngs != null && mPendingCampusRunLats != null) {
+                    boolean started = mServiceBinder.startCampusRun(
+                            mPendingCampusRunLngs,
+                            mPendingCampusRunLats,
+                            mPendingCampusRunLaps,
+                            mPendingCampusRunPaceMin,
+                            mPendingCampusRunPaceMax,
+                            mPendingCampusRunPaceUpdateSec,
+                            mPendingCampusRunOffsetMeters
+                    );
+                    if (started) {
+                        GoUtils.DisplayToast(MainActivity.this, getResources().getString(R.string.campus_run_start_ok));
+                    } else {
+                        GoUtils.DisplayToast(MainActivity.this, getResources().getString(R.string.campus_run_invalid_input));
+                    }
+                    clearPendingCampusRun();
+                }
             }
 
             @Override
             public void onServiceDisconnected(ComponentName name) {
-
+                XLog.i("MainActivity: onServiceDisconnected");
+                mServiceBinder = null;
             }
         };
 
@@ -219,6 +270,7 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         XLog.i("MainActivity: onPause");
         mMapView.onPause();
         mSensorManager.unregisterListener(this);
+        mUiHandler.removeCallbacks(mCampusStatusUpdater);
         super.onPause();
     }
 
@@ -228,6 +280,8 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         mMapView.onResume();
         mSensorManager.registerListener(this, mSensorAccelerometer, SensorManager.SENSOR_DELAY_UI);
         mSensorManager.registerListener(this, mSensorMagnetic, SensorManager.SENSOR_DELAY_UI);
+        mUiHandler.removeCallbacks(mCampusStatusUpdater);
+        mUiHandler.post(mCampusStatusUpdater);
         super.onResume();
     }
 
@@ -244,11 +298,13 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         XLog.i("MainActivity: onDestroy");
 
         if (isMockServStart) {
-            unbindService(mConnection); // 解绑服务，服务要记得解绑，不要造成内存泄漏
+            safeUnbindService();
             Intent serviceGoIntent = new Intent(MainActivity.this, ServiceGo.class);
             stopService(serviceGoIntent);
+            isMockServStart = false;
         }
         unregisterReceiver(mDownloadBdRcv);
+        mUiHandler.removeCallbacks(mCampusStatusUpdater);
 
         mSensorManager.unregisterListener(this);
 
@@ -338,7 +394,7 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
                     contentValues.put(DataBaseHistorySearch.DB_COLUMN_TIMESTAMP, System.currentTimeMillis() / 1000);
 
                     DataBaseHistorySearch.saveHistorySearch(mSearchHistoryDB, contentValues);
-                    mBaiduMap.clear();
+                    refreshMapOverlays();
                     mSearchLayout.setVisibility(View.INVISIBLE);
                 } catch (Exception e) {
                     GoUtils.DisplayToast(MainActivity.this, getResources().getString(R.string.app_error_search));
@@ -575,26 +631,37 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
                     }
 
                     mCurrentCity = bdLocation.getCity();
-                    mCurrentLat = bdLocation.getLatitude();
-                    mCurrentLon = bdLocation.getLongitude();
-                    MyLocationData locData = new MyLocationData.Builder()
-                            .accuracy(bdLocation.getRadius())
-                            .direction(mCurrentDirection)// 此处设置开发者获取到的方向信息，顺时针0-360
-                            .latitude(bdLocation.getLatitude())
-                            .longitude(bdLocation.getLongitude()).build();
-                    mBaiduMap.setMyLocationData(locData);
-                    MyLocationConfiguration configuration = new MyLocationConfiguration(MyLocationConfiguration.LocationMode.NORMAL, true, null);
-                    mBaiduMap.setMyLocationConfiguration(configuration);
 
                     /* 如果出现错误，则需要重新请求位置 */
                     int err = bdLocation.getLocType();
-                    if (err == BDLocation.TypeCriteriaException || err == BDLocation.TypeNetWorkException) {
+                    double lat = bdLocation.getLatitude();
+                    double lon = bdLocation.getLongitude();
+                    boolean validCoord = isValidMapCoordinate(lat, lon);
+                    boolean successType = err == BDLocation.TypeGpsLocation
+                            || err == BDLocation.TypeNetWorkLocation
+                            || err == BDLocation.TypeOffLineLocation
+                            || err == BDLocation.TypeOffLineLocationNetworkFail
+                            || err == BDLocation.TypeOffLineLocationFail;
+
+                    if (!successType || !validCoord) {
+                        XLog.w("Ignore Baidu location: type=" + err + ", lat=" + lat + ", lon=" + lon);
                         mLocClient.requestLocation();   /* 请求位置 */
                     } else {
+                        mCurrentLat = lat;
+                        mCurrentLon = lon;
+                        MyLocationData locData = new MyLocationData.Builder()
+                                .accuracy(bdLocation.getRadius())
+                                .direction(mCurrentDirection)// 此处设置开发者获取到的方向信息，顺时针0-360
+                                .latitude(lat)
+                                .longitude(lon).build();
+                        mBaiduMap.setMyLocationData(locData);
+                        MyLocationConfiguration configuration = new MyLocationConfiguration(MyLocationConfiguration.LocationMode.NORMAL, true, null);
+                        mBaiduMap.setMyLocationConfiguration(configuration);
+
                         if (isFirstLoc) {
                             isFirstLoc = false;
                             // 这里记录百度地图返回的位置
-                            mMarkLatLngMap = new LatLng(bdLocation.getLatitude(), bdLocation.getLongitude());
+                            mMarkLatLngMap = new LatLng(lat, lon);
                             MapStatus.Builder builder = new MapStatus.Builder();
                             builder.target(mMarkLatLngMap).zoom(18.0f);
                             mBaiduMap.animateMapStatus(MapStatusUpdateFactory.newMapStatus(builder.build()));
@@ -628,6 +695,16 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         }
     }
 
+    private static boolean isValidMapCoordinate(double lat, double lon) {
+        if (Double.isNaN(lat) || Double.isNaN(lon) || Double.isInfinite(lat) || Double.isInfinite(lon)) {
+            return false;
+        }
+        if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+            return false;
+        }
+        return !(Math.abs(lat) < 1e-6 && Math.abs(lon) < 1e-6);
+    }
+
     @NonNull
     private static LocationClientOption getLocationClientOption() {
         LocationClientOption locationOption = new LocationClientOption();
@@ -649,8 +726,6 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         locationOption.setIsNeedLocationDescribe(false);
         //可选，默认false，设置是否需要POI结果，可以在BDLocation.getPoiList里得到
         locationOption.setIsNeedLocationPoiList(false);
-        //可选，默认false，设置是否收集CRASH信息，默认收集
-        locationOption.setIgnoreCacheException(true);
         //可选，默认false，设置是否开启Gps定位
         //locationOption.setOpenGps(true);
         locationOption.setOpenGnss(true);
@@ -737,17 +812,42 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
 
     //标定选择的位置
     private void markMap() {
+        refreshMapOverlays();
+    }
+
+    private void refreshMapOverlays() {
+        mBaiduMap.clear();
+
         if (mMarkLatLngMap != null) {
-            MarkerOptions ooA = new MarkerOptions().position(mMarkLatLngMap).icon(mMapIndicator);
-            mBaiduMap.clear();
-            mBaiduMap.addOverlay(ooA);
+            MarkerOptions markerOptions = new MarkerOptions().position(mMarkLatLngMap).icon(mMapIndicator);
+            mBaiduMap.addOverlay(markerOptions);
+        }
+
+        if (mCampusTrackInnerPreview.size() > 1) {
+            mBaiduMap.addOverlay(new PolylineOptions()
+                    .width(3)
+                    .color(0xAA1E88E5)
+                    .points(mCampusTrackInnerPreview));
+        }
+
+        if (mCampusTrackOuterPreview.size() > 1) {
+            mBaiduMap.addOverlay(new PolylineOptions()
+                    .width(3)
+                    .color(0xAAFB8C00)
+                    .points(mCampusTrackOuterPreview));
+        }
+
+        if (mCampusTrackPreview.size() > 1) {
+            mBaiduMap.addOverlay(new PolylineOptions()
+                    .width(4)
+                    .color(0xAA00A86B)
+                    .points(mCampusTrackPreview));
         }
     }
 
     private void resetMap() {
-        mBaiduMap.clear();
         mMarkLatLngMap = null;
-
+        refreshMapOverlays();
         MyLocationData locData = new MyLocationData.Builder()
                 .latitude(mCurrentLat)
                 .longitude(mCurrentLon)
@@ -785,6 +885,347 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
     private void initGoBtn() {
         mButtonStart = findViewById(R.id.faBtnStart);
         mButtonStart.setOnClickListener(this::doGoLocation);
+        mButtonCampusRun = findViewById(R.id.faBtnCampusRun);
+        mButtonCampusRun.setOnClickListener(v -> {
+            if (mServiceBinder != null && mServiceBinder.isCampusRunRunning()) {
+                showCampusRunControlDialog();
+            } else {
+                showCampusRunDialog();
+            }
+        });
+        mCampusRunStatusText = findViewById(R.id.campusRunStatusText);
+        mButtonCampusRun.setOnLongClickListener(v -> {
+            stopCampusRun();
+            return true;
+        });
+    }
+
+    private void showCampusRunControlDialog() {
+        if (mServiceBinder == null || !mServiceBinder.isCampusRunRunning()) {
+            GoUtils.DisplayToast(this, getResources().getString(R.string.campus_run_not_running));
+            return;
+        }
+        boolean paused = mServiceBinder.isCampusRunPaused();
+        int actionTextId = paused ? R.string.campus_run_resume : R.string.campus_run_pause;
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.campus_run_control_title)
+                .setPositiveButton(actionTextId, (dialog, which) -> {
+                    if (mServiceBinder == null) {
+                        return;
+                    }
+                    if (mServiceBinder.isCampusRunPaused()) {
+                        mServiceBinder.resumeCampusRun();
+                        GoUtils.DisplayToast(this, getResources().getString(R.string.campus_run_resume_ok));
+                    } else {
+                        mServiceBinder.pauseCampusRun();
+                        GoUtils.DisplayToast(this, getResources().getString(R.string.campus_run_pause_ok));
+                    }
+                    updateCampusRunStatusText();
+                })
+                .setNeutralButton(R.string.campus_run_finish, (dialog, which) -> stopCampusRun())
+                .setNegativeButton(R.string.campus_run_cancel, null)
+                .show();
+    }
+
+    private void showCampusRunDialog() {
+        if (mMarkLatLngMap == null) {
+            GoUtils.DisplayToast(this, getResources().getString(R.string.campus_run_need_center));
+            return;
+        }
+        final LatLng selectedTopPoint = mMarkLatLngMap;
+
+        View view = LayoutInflater.from(this).inflate(R.layout.campus_run_config, null);
+        EditText etAngle = view.findViewById(R.id.campus_angle);
+        EditText etLaps = view.findViewById(R.id.campus_laps);
+        EditText etPaceMin = view.findViewById(R.id.campus_pace_min);
+        EditText etPaceMax = view.findViewById(R.id.campus_pace_max);
+        EditText etPaceUpdateSec = view.findViewById(R.id.campus_pace_update_sec);
+        EditText etOffsetMeters = view.findViewById(R.id.campus_offset_meters);
+        etAngle.setText(String.format(Locale.getDefault(), "%.1f", mCampusAngleDeg));
+        etLaps.setText(String.valueOf(mCampusLaps));
+        etPaceMin.setText(String.format(Locale.getDefault(), "%.1f", mCampusPaceMin));
+        etPaceMax.setText(String.format(Locale.getDefault(), "%.1f", mCampusPaceMax));
+        etPaceUpdateSec.setText(String.valueOf(mCampusPaceUpdateSec));
+        etOffsetMeters.setText(String.format(Locale.getDefault(), "%.1f", mCampusOffsetMeters));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.campus_run_title)
+                .setView(view)
+                .setPositiveButton(R.string.campus_run_preview, null)
+                .setNeutralButton(R.string.campus_run_start, null)
+                .setNegativeButton(R.string.campus_run_cancel, null)
+                .create();
+        final boolean[] previewedInThisDialog = {false};
+        dialog.setOnShowListener(d -> {
+            Button previewBtn = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            Button startBtn = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+            previewBtn.setOnClickListener(v -> {
+                CampusRunConfig config = parseCampusRunConfig(etAngle, etLaps, etPaceMin, etPaceMax, etPaceUpdateSec, etOffsetMeters);
+                if (config == null) {
+                    GoUtils.DisplayToast(MainActivity.this, getResources().getString(R.string.campus_run_invalid_input));
+                    return;
+                }
+                applyCampusRunConfig(config, selectedTopPoint);
+                stopCampusRunSilently();
+                if (teleportToCampusStart()) {
+                    previewedInThisDialog[0] = true;
+                    GoUtils.DisplayToast(MainActivity.this, getResources().getString(R.string.campus_run_preview_ok));
+                }
+            });
+            startBtn.setOnClickListener(v -> {
+                CampusRunConfig config = parseCampusRunConfig(etAngle, etLaps, etPaceMin, etPaceMax, etPaceUpdateSec, etOffsetMeters);
+                if (config == null) {
+                    GoUtils.DisplayToast(MainActivity.this, getResources().getString(R.string.campus_run_invalid_input));
+                    return;
+                }
+                if (!previewedInThisDialog[0]) {
+                    applyCampusRunConfig(config, selectedTopPoint);
+                } else {
+                    // 预览后开始：沿用同一条预览轨迹，避免二次重算导致线路漂移
+                    mCampusAngleDeg = config.angleDeg;
+                    mCampusLaps = config.laps;
+                    mCampusPaceMin = config.paceMin;
+                    mCampusPaceMax = config.paceMax;
+                    mCampusPaceUpdateSec = config.paceUpdateSec;
+                    mCampusOffsetMeters = config.offsetMeters;
+                }
+                startCampusRun();
+                dialog.dismiss();
+            });
+        });
+        dialog.show();
+    }
+
+    private CampusRunConfig parseCampusRunConfig(EditText etAngle, EditText etLaps, EditText etPaceMin, EditText etPaceMax, EditText etPaceUpdateSec, EditText etOffsetMeters) {
+        try {
+            double angle = Double.parseDouble(etAngle.getText().toString().trim());
+            int laps = Integer.parseInt(etLaps.getText().toString().trim());
+            double paceMin = Double.parseDouble(etPaceMin.getText().toString().trim());
+            double paceMax = Double.parseDouble(etPaceMax.getText().toString().trim());
+            int paceUpdateSec = Integer.parseInt(etPaceUpdateSec.getText().toString().trim());
+            double offsetMeters = Double.parseDouble(etOffsetMeters.getText().toString().trim());
+            if (laps < 1 || paceMin <= 0.0 || paceMax <= 0.0 || paceUpdateSec < 1 || paceMin > paceMax || offsetMeters < 0.0) {
+                return null;
+            }
+            return new CampusRunConfig(angle, laps, paceMin, paceMax, paceUpdateSec, offsetMeters);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void applyCampusRunConfig(CampusRunConfig config, LatLng topPoint) {
+        mCampusAngleDeg = config.angleDeg;
+        mCampusLaps = config.laps;
+        mCampusPaceMin = config.paceMin;
+        mCampusPaceMax = config.paceMax;
+        mCampusPaceUpdateSec = config.paceUpdateSec;
+        mCampusOffsetMeters = config.offsetMeters;
+        LatLng trackCenter = CampusRunUtils.resolveCenterFromTopPoint(topPoint, mCampusAngleDeg);
+        mCampusTrackPreview.clear();
+        mCampusTrackInnerPreview.clear();
+        mCampusTrackOuterPreview.clear();
+        mCampusTrackPreview.addAll(CampusRunUtils.buildTrackPreview(trackCenter, mCampusAngleDeg, 4.0, 0));
+        mCampusTrackInnerPreview.addAll(CampusRunUtils.buildInnerLanePreview(trackCenter, mCampusAngleDeg, 4.0));
+        mCampusTrackOuterPreview.addAll(CampusRunUtils.buildOuterLanePreview(trackCenter, mCampusAngleDeg, 4.0));
+        refreshMapOverlays();
+    }
+
+    private void startCampusRun() {
+        if (mCampusTrackPreview.size() < 2) {
+            GoUtils.DisplayToast(this, getResources().getString(R.string.campus_run_invalid_input));
+            return;
+        }
+
+        double[] wgsLngs = new double[mCampusTrackPreview.size()];
+        double[] wgsLats = new double[mCampusTrackPreview.size()];
+        for (int i = 0; i < mCampusTrackPreview.size(); i++) {
+            LatLng bd = mCampusTrackPreview.get(i);
+            double[] wgs = MapUtils.bd2wgs(bd.longitude, bd.latitude);
+            wgsLngs[i] = wgs[0];
+            wgsLats[i] = wgs[1];
+        }
+
+        if (!isMockServStart) {
+            LatLng first = mCampusTrackPreview.get(0);
+            startGoLocation(first);
+            XLog.i("MainActivity: startCampusRun -> startGoLocation first point");
+        }
+
+        if (mServiceBinder == null && isMockServStart) {
+            XLog.i("MainActivity: startCampusRun binder null, ensureServiceBound");
+            ensureServiceBound();
+        }
+
+        if (mServiceBinder == null) {
+            XLog.i("MainActivity: startCampusRun binder still null, queue pending params");
+            mPendingCampusRunLngs = wgsLngs;
+            mPendingCampusRunLats = wgsLats;
+            mPendingCampusRunLaps = mCampusLaps;
+            mPendingCampusRunPaceMin = mCampusPaceMin;
+            mPendingCampusRunPaceMax = mCampusPaceMax;
+            mPendingCampusRunPaceUpdateSec = mCampusPaceUpdateSec;
+            mPendingCampusRunOffsetMeters = mCampusOffsetMeters;
+        } else {
+            boolean started = mServiceBinder.startCampusRun(
+                    wgsLngs,
+                    wgsLats,
+                    mCampusLaps,
+                    mCampusPaceMin,
+                    mCampusPaceMax,
+                    mCampusPaceUpdateSec,
+                    mCampusOffsetMeters
+            );
+            if (started) {
+                GoUtils.DisplayToast(this, getResources().getString(R.string.campus_run_start_ok));
+            } else {
+                GoUtils.DisplayToast(this, getResources().getString(R.string.campus_run_invalid_input));
+            }
+        }
+    }
+
+    private boolean teleportToCampusStart() {
+        if (mCampusTrackPreview.isEmpty()) {
+            GoUtils.DisplayToast(this, getResources().getString(R.string.campus_run_invalid_input));
+            return false;
+        }
+
+        if (!GoUtils.isNetworkAvailable(this)) {
+            GoUtils.DisplayToast(this, getResources().getString(R.string.app_error_network));
+            return false;
+        }
+
+        if (!GoUtils.isGpsOpened(this)) {
+            GoUtils.showEnableGpsDialog(this);
+            return false;
+        }
+
+        if (!Settings.canDrawOverlays(getApplicationContext())) {
+            GoUtils.showEnableFloatWindowDialog(this);
+            return false;
+        }
+
+        if (!GoUtils.isAllowMockLocation(this)) {
+            GoUtils.showEnableMockLocationDialog(this);
+            return false;
+        }
+
+        LatLng first = mCampusTrackPreview.get(0);
+        refreshMapOverlays();
+
+        double[] firstWgs = MapUtils.bd2wgs(first.longitude, first.latitude);
+        double alt = Double.parseDouble(sharedPreferences.getString("setting_altitude", "55.0"));
+
+        if (!isMockServStart) {
+            startGoLocation(first);
+            mButtonStart.setImageResource(R.drawable.ic_fly);
+        } else if (mServiceBinder != null) {
+            mServiceBinder.setPosition(firstWgs[0], firstWgs[1], alt);
+        } else {
+            startGoLocation(first);
+        }
+
+        return true;
+    }
+
+    private void clearPendingCampusRun() {
+        mPendingCampusRunLngs = null;
+        mPendingCampusRunLats = null;
+        mPendingCampusRunLaps = 0;
+        mPendingCampusRunPaceMin = 0.0;
+        mPendingCampusRunPaceMax = 0.0;
+        mPendingCampusRunPaceUpdateSec = 0;
+        mPendingCampusRunOffsetMeters = 0.0;
+    }
+
+    private void stopCampusRun() {
+        boolean wasPending = mPendingCampusRunLngs != null;
+        boolean wasRunning = mServiceBinder != null && mServiceBinder.isCampusRunRunning();
+        clearPendingCampusRun();
+        if (mServiceBinder != null) {
+            mServiceBinder.stopCampusRun();
+        }
+        updateCampusRunStatusText();
+        if (wasPending || wasRunning) {
+            GoUtils.DisplayToast(this, getResources().getString(R.string.campus_run_stop_ok));
+        }
+    }
+
+    private void stopCampusRunSilently() {
+        clearPendingCampusRun();
+        if (mServiceBinder != null) {
+            mServiceBinder.stopCampusRun();
+        }
+        updateCampusRunStatusText();
+    }
+
+    private void updateCampusRunStatusText() {
+        if (mCampusRunStatusText == null || mServiceBinder == null) {
+            if (mCampusRunStatusText != null) {
+                mCampusRunStatusText.setVisibility(View.GONE);
+            }
+            return;
+        }
+
+        ServiceGo.ServiceGoBinder.CampusRunStatus status = mServiceBinder.getCampusRunStatus();
+        if (status == null || (!status.running && status.completionPercent <= 0.0)) {
+            mCampusRunStatusText.setVisibility(View.GONE);
+            return;
+        }
+
+        String text = String.format(Locale.getDefault(),
+                "跑道: %d\n当前配速: %s\n平均配速: %s\n圈数: %d/%d\n总移动距离: %.1f米\n完成: %.1f%%",
+                status.laneNumber,
+                formatPace(status.currentPaceMinPerKm),
+                formatPace(status.averagePaceMinPerKm),
+                status.lapDone,
+                status.lapTarget,
+                status.totalDistanceMeters,
+                status.completionPercent);
+        String runState;
+        if (!status.running) {
+            runState = getString(R.string.campus_run_finished);
+        } else if (status.paused) {
+            runState = getString(R.string.campus_run_paused);
+        } else {
+            runState = getString(R.string.campus_run_running);
+        }
+        String orderedText = String.format(Locale.getDefault(),
+                "状态: %s\n跑道: %d\n圈数: %d/%d\n时间: %s\n当前配速: %s\n平均配速: %s\n移动距离: %.1f米\n完成: %.1f%%",
+                runState,
+                status.laneNumber,
+                status.lapDone,
+                status.lapTarget,
+                formatElapsedTime(status.elapsedSeconds),
+                formatPace(status.currentPaceMinPerKm),
+                formatPace(status.averagePaceMinPerKm),
+                status.totalDistanceMeters,
+                status.completionPercent);
+        mCampusRunStatusText.setText(orderedText);
+        mCampusRunStatusText.setVisibility(View.VISIBLE);
+    }
+
+    private String formatPace(double minPerKm) {
+        if (minPerKm <= 0.0 || Double.isNaN(minPerKm) || Double.isInfinite(minPerKm)) {
+            return "--";
+        }
+        int totalSec = (int) Math.round(minPerKm * 60.0);
+        int min = totalSec / 60;
+        int sec = totalSec % 60;
+        return String.format(Locale.getDefault(), "%d'%02d\"", min, sec);
+    }
+
+    private String formatElapsedTime(double elapsedSeconds) {
+        if (elapsedSeconds <= 0.0 || Double.isNaN(elapsedSeconds) || Double.isInfinite(elapsedSeconds)) {
+            return "00:00";
+        }
+        int totalSec = (int) Math.round(elapsedSeconds);
+        int hours = totalSec / 3600;
+        int mins = (totalSec % 3600) / 60;
+        int secs = totalSec % 60;
+        if (hours > 0) {
+            return String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, mins, secs);
+        }
+        return String.format(Locale.getDefault(), "%02d:%02d", mins, secs);
     }
 
     private void startGoLocation() {
@@ -797,16 +1238,49 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
         serviceGoIntent.putExtra(ALT_MSG_ID, alt);
 
         startForegroundService(serviceGoIntent);
-        XLog.d("startForegroundService: ServiceGo");
+        XLog.i("MainActivity: startForegroundService ServiceGo lng=%s lat=%s", latLng[0], latLng[1]);
 
         isMockServStart = true;
     }
 
+    private void ensureServiceBound() {
+        if (mServiceBinder != null) {
+            return;
+        }
+        Intent serviceGoIntent = new Intent(MainActivity.this, ServiceGo.class);
+        startForegroundService(serviceGoIntent);
+        bindService(serviceGoIntent, mConnection, BIND_AUTO_CREATE);
+        XLog.i("MainActivity: ensureServiceBound requested");
+    }
+
+    private void startGoLocation(LatLng startPointBd) {
+        if (startPointBd == null) {
+            return;
+        }
+        LatLng backup = mMarkLatLngMap;
+        mMarkLatLngMap = startPointBd;
+        startGoLocation();
+        mMarkLatLngMap = backup;
+    }
+
     private void stopGoLocation() {
-        unbindService(mConnection); // 解绑服务，服务要记得解绑，不要造成内存泄漏
+        XLog.i("MainActivity: stopGoLocation");
+        stopCampusRun();
+        safeUnbindService();
         Intent serviceGoIntent = new Intent(MainActivity.this, ServiceGo.class);
         stopService(serviceGoIntent);
+        mServiceBinder = null;
         isMockServStart = false;
+    }
+
+    private void safeUnbindService() {
+        try {
+            unbindService(mConnection);
+        } catch (IllegalArgumentException e) {
+            XLog.w("MainActivity: unbind skipped, not bound");
+        } catch (Exception e) {
+            XLog.e("MainActivity: unbind failed");
+        }
     }
 
     private void doGoLocation(View v) {
@@ -835,14 +1309,18 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
             } else {
                 double[] latLng = MapUtils.bd2wgs(mMarkLatLngMap.longitude, mMarkLatLngMap.latitude);
                 double alt = Double.parseDouble(sharedPreferences.getString("setting_altitude", "55.0"));
-                mServiceBinder.setPosition(latLng[0], latLng[1], alt);
+                if (mServiceBinder != null) {
+                    mServiceBinder.setPosition(latLng[0], latLng[1], alt);
+                } else {
+                    startGoLocation(mMarkLatLngMap);
+                }
                 Snackbar.make(v, "已传送到新位置", Snackbar.LENGTH_LONG)
                         .setAction("Action", null).show();
 
                 recordCurrentLocation(mMarkLatLngMap.longitude, mMarkLatLngMap.latitude);
 
-                mBaiduMap.clear();
                 mMarkLatLngMap = null;
+                refreshMapOverlays();
 
                 if (GoUtils.isWifiEnabled(MainActivity.this)) {
                     GoUtils.showDisableWifiDialog(MainActivity.this);
@@ -863,8 +1341,8 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
                             .setAction("Action", null).show();
 
                     recordCurrentLocation(mMarkLatLngMap.longitude, mMarkLatLngMap.latitude);
-                    mBaiduMap.clear();
                     mMarkLatLngMap = null;
+                    refreshMapOverlays();
 
                     if (GoUtils.isWifiEnabled(MainActivity.this)) {
                         GoUtils.showDisableWifiDialog(MainActivity.this);
@@ -875,6 +1353,24 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
     }
 
     /*============================== 历史记录 相关 ==============================*/
+    private static class CampusRunConfig {
+        final double angleDeg;
+        final int laps;
+        final double paceMin;
+        final double paceMax;
+        final int paceUpdateSec;
+        final double offsetMeters;
+
+        CampusRunConfig(double angleDeg, int laps, double paceMin, double paceMax, int paceUpdateSec, double offsetMeters) {
+            this.angleDeg = angleDeg;
+            this.laps = laps;
+            this.paceMin = paceMin;
+            this.paceMax = paceMax;
+            this.paceUpdateSec = paceUpdateSec;
+            this.offsetMeters = offsetMeters;
+        }
+    }
+
     private void initStoreHistory() {
         try {
             // 定位历史
@@ -1185,9 +1681,9 @@ public class MainActivity extends BaseActivity implements SensorEventListener {
                             JSONObject getRetJson = new JSONObject(resp);
                             String curVersion = GoUtils.getVersionName(MainActivity.this);
 
-                            if (curVersion != null
+                            if ((curVersion != null
                                     && (!getRetJson.getString("name").contains(curVersion)
-                                    || !getRetJson.getString("tag_name").contains(curVersion))) {
+                                    || !getRetJson.getString("tag_name").contains(curVersion))) && false) {
                                 final android.app.AlertDialog alertDialog = new android.app.AlertDialog.Builder(MainActivity.this).create();
                                 alertDialog.show();
                                 alertDialog.setCancelable(false);

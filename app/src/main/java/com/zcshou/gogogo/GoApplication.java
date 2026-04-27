@@ -1,6 +1,9 @@
 package com.zcshou.gogogo;
 
 import android.app.Application;
+import android.content.SharedPreferences;
+
+import androidx.preference.PreferenceManager;
 
 import com.baidu.location.LocationClient;
 import com.baidu.mapapi.CoordType;
@@ -29,15 +32,18 @@ public class GoApplication extends Application {
 
         initXlog();
 
-        // 百度地图 7.5 开始，要求必须同意隐私政策，默认为false
-        SDKInitializer.setAgreePrivacy(this, true);
-        // 百度定位 7.5 开始，要求必须同意隐私政策，默认为false(官方说可以统一为以上接口，但实际测试并不行，定位还是需要单独设置)
-        LocationClient.setAgreePrivacy(true);
-        SDKInitializer.setApiKey(BuildConfig.MAPS_API_KEY);
-        // 在使用 SDK 各组间之前初始化 context 信息，传入 ApplicationContext
-        SDKInitializer.initialize(this);
-
-        SDKInitializer.setCoordType(CoordType.BD09LL);
+        try {
+            // 百度地图 7.5 开始，要求必须同意隐私政策，默认为false
+            SDKInitializer.setAgreePrivacy(this, true);
+            // 百度定位 7.5 开始，要求必须同意隐私政策，默认为false(官方说可以统一为以上接口，但实际测试并不行，定位还是需要单独设置)
+            LocationClient.setAgreePrivacy(true);
+            SDKInitializer.setApiKey(BuildConfig.MAPS_API_KEY);
+            // 在使用 SDK 各组间之前初始化 context 信息，传入 ApplicationContext
+            SDKInitializer.initialize(this);
+            SDKInitializer.setCoordType(CoordType.BD09LL);
+        } catch (Throwable t) {
+            XLog.e("ERROR: Baidu SDK init failed", t);
+        }
     }
 
     /**
@@ -46,8 +52,10 @@ public class GoApplication extends Application {
     private void initXlog() {
         File logPath = getExternalFilesDir("Logs");
         if (logPath != null) {
+            SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(this);
+            boolean logOff = preferences.getBoolean("setting_log_off", true);
             LogConfiguration config = new LogConfiguration.Builder()
-                    .logLevel(LogLevel.ALL)
+                    .logLevel(logOff ? LogLevel.NONE : LogLevel.ALL)
                     .tag(APP_NAME)                                         // 指定 TAG，默认为 "X-LOG"
                     .enableThreadInfo()                                    // 允许打印线程信息，默认禁止
                     .enableStackTrace(2)                                   // 允许打印深度为 2 的调用栈信息，默认禁止
