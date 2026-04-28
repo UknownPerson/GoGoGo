@@ -2,7 +2,6 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:background="@drawable/bg_surface"
     android:orientation="vertical"
     android:padding="16dp">
 
@@ -15,7 +14,6 @@
         android:id="@+id/campus_angle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@drawable/bg_input_field"
         android:inputType="numberDecimal|numberSigned"
         android:padding="10dp"
         android:singleLine="true" />
@@ -30,7 +28,6 @@
         android:id="@+id/campus_laps"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@drawable/bg_input_field"
         android:inputType="number"
         android:padding="10dp"
         android:singleLine="true" />
@@ -45,7 +42,6 @@
         android:id="@+id/campus_pace_min"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@drawable/bg_input_field"
         android:inputType="numberDecimal"
         android:padding="10dp"
         android:singleLine="true" />
@@ -60,7 +56,6 @@
         android:id="@+id/campus_pace_max"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@drawable/bg_input_field"
         android:inputType="numberDecimal"
         android:padding="10dp"
         android:singleLine="true" />
@@ -75,7 +70,6 @@
         android:id="@+id/campus_pace_update_sec"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@drawable/bg_input_field"
         android:inputType="number"
         android:padding="10dp"
         android:singleLine="true" />
@@ -90,7 +84,6 @@
         android:id="@+id/campus_offset_meters"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@drawable/bg_input_field"
         android:inputType="numberDecimal"
         android:padding="10dp"
         android:singleLine="true" />
